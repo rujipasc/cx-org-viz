@@ -1,0 +1,1858 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CardX Org Chart - Excel Support</title>
+    <script>
+      (() => {
+        const originalWarn = console.warn.bind(console);
+        console.warn = (...args) => {
+          const first = typeof args[0] === "string" ? args[0] : "";
+          if (first.includes("cdn.tailwindcss.com should not be used in production")) return;
+          if (first.includes("You are using the in-browser Babel transformer")) return;
+          originalWarn(...args);
+        };
+      })();
+    </script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    
+    <style>
+      @font-face {
+        font-family: "CardXBrand";
+        src: url("./CardX-Regular.otf") format("opentype");
+        font-weight: 400;
+        font-style: normal;
+        font-display: swap;
+      }
+      @font-face {
+        font-family: "CardXBrand";
+        src: url("./CardX-SemiBold.otf") format("opentype");
+        font-weight: 600;
+        font-style: normal;
+        font-display: swap;
+      }
+      @font-face {
+        font-family: "CardXBrand";
+        src: url("./CardX-Bold.otf") format("opentype");
+        font-weight: 700;
+        font-style: normal;
+        font-display: swap;
+      }
+
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body, html { height: 100%; width: 100%; }
+      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", sans-serif; background-color: #f8fafc; overflow: hidden; }
+      
+      .animate-in { animation: fadeIn 0.4s ease-out; }
+      @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+      .modal-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; z-index: 50; }
+      .modal-content { background: white; border-radius: 0.5rem; padding: 2rem; max-width: 500px; width: 90vw; max-height: 85vh; overflow-y: auto; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1); animation: modalSlideIn 0.2s ease-out; }
+      @keyframes modalSlideIn { from { opacity: 0; transform: scale(0.95) translateY(-20px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+      
+      /* Scroll Styling */
+      .scroll-container::-webkit-scrollbar { width: 10px; height: 10px; }
+      .scroll-container::-webkit-scrollbar-track { background: #f1f5f9; }
+      .scroll-container::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 5px; border: 2px solid #f1f5f9; }
+      .scroll-container::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+      
+      .org-tree { display: flex; flex-direction: column; align-items: center; }
+      .org-level { display: flex; justify-content: center; gap: 2rem; }
+      .org-level-wrap {
+        flex-wrap: wrap;
+        gap: 1rem 1.25rem;
+        width: min(2200px, 96vw);
+        max-width: min(2200px, 96vw);
+        align-content: flex-start;
+      }
+      .org-level-item-wrap {
+        flex: 0 0 auto;
+        width: 18rem;
+      }
+      .org-level-wrap + .org-level-wrap { margin-top: 1rem; }
+      .org-node { display: flex; flex-direction: column; align-items: center; }
+      
+      .file-input-wrapper { position: relative; display: inline-flex; }
+      .file-input-wrapper input[type=file] {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        opacity: 0;
+        cursor: pointer;
+      }
+
+      /* Cursors */
+      .cursor-grab { cursor: grab; }
+      .cursor-grabbing { cursor: grabbing; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <script id="orgchart-app" type="text/plain">
+      const { useState, useMemo, useEffect, useRef } = React;
+
+      // Helper: Badge Colors
+      const getOrgBadgeColor = (type) => {
+        if (!type) return 'bg-slate-100 text-slate-700 border-slate-200';
+        const t = type.toLowerCase();
+        if (t.includes('group') || t.includes('bu')) return 'bg-purple-100 text-purple-700 border-purple-200';
+        if (t.includes('division')) return 'bg-indigo-100 text-indigo-700 border-indigo-200';
+        if (t.includes('department')) return 'bg-teal-100 text-teal-700 border-teal-200';
+        if (t.includes('unit')) return 'bg-orange-100 text-orange-700 border-orange-200';
+        return 'bg-slate-100 text-slate-700 border-slate-200';
+      };
+
+      const buildHierarchy = (flatData) => {
+        const dataMap = {};
+        const roots = [];
+        flatData.forEach((row, rowIndex) => {
+          // Robust key checking (trimming keys to avoid issues with extra spaces in Excel headers)
+          const getVal = (key) => {
+             const foundKey = Object.keys(row).find(k => k.trim() === key);
+             return foundKey ? row[foundKey] : undefined;
+          };
+
+          const rawId = getVal("Employee ID CardX")?.toString().trim();
+          const employeeName = (getVal("Name (EN)") || "").toString().trim();
+          const employeePosition = (getVal("Position") || "").toString().trim();
+          const managerId = getVal("Supervisor ID")?.toString().trim();
+          const isVacant = !rawId;
+          // Skip malformed rows that can create blank artifacts in export.
+          if (!employeeName && !employeePosition) return;
+
+          let id = rawId || `VACANT-${rowIndex + 1}-${managerId || "ROOT"}`;
+          if (dataMap[id]) id = `${id}-DUP-${rowIndex + 1}`;
+
+          let orgType = "Company";
+          let orgName = getVal("Company") || "CardX";
+          
+          const unit = getVal("Unit");
+          const dept = getVal("Department");
+          const div = getVal("Division");
+          const group = getVal("Group");
+          const positionText = (getVal("Position") || "").toString().trim().toLowerCase();
+          const divisionText = (div || "").toString().trim().toLowerCase();
+          const isCEO = positionText.includes("chief executive officer") || positionText === "ceo";
+          const isCPO = positionText.includes("chief people officer") || divisionText.includes("cpo office");
+
+          if (isCEO) { orgType = "Company"; orgName = getVal("Company") || "CardX"; }
+          else if (unit) { orgType = "Unit"; orgName = unit; }
+          else if (dept) { orgType = "Department"; orgName = dept; }
+          else if (isCPO && group) { orgType = "Group"; orgName = group; }
+          else if (div) { orgType = "Division"; orgName = div; }
+          else if (group) { orgType = "Group"; orgName = group; }
+          
+          dataMap[id] = {
+            id: id, 
+            employeeId: rawId || "",
+            isVacant,
+            name: employeeName || "Vacant",
+            position: employeePosition || "Vacant Position",
+            corporateTitle: (getVal("Corporate Title") || "").toString().trim() || (isVacant ? "Vacant" : "Not Specified"),
+            orgType: orgType, 
+            orgName: orgName, 
+            groupName: group,
+            divisionName: div,
+            departmentName: dept,
+            unitName: unit,
+            email: getVal("Office Email") || "-", 
+            phone: "-", 
+            hireDate: isVacant ? "" : getVal("Service Date"), // Excel might return serial date, CSV returns string
+            location: getVal("Location"), 
+            manager_id: managerId, 
+            subordinates: []
+          };
+        });
+
+        Object.values(dataMap).forEach(item => {
+          const managerId = item.manager_id;
+          if (managerId && dataMap[managerId]) {
+            dataMap[managerId].subordinates.push(item);
+          } else { roots.push(item); }
+        });
+        const sortTree = (items) => {
+          items.sort(compareReportOrder);
+          items.forEach((item) => {
+            if (item.subordinates?.length) sortTree(item.subordinates);
+          });
+        };
+        sortTree(roots);
+        return roots;
+      };
+
+      // Helper to format Excel Date Serial (if needed) or String Date
+      const formatDate = (dateInput) => {
+          if (!dateInput) return "-";
+          
+          // Handle Excel Serial Date (numbers like 45000)
+          if (typeof dateInput === 'number') {
+             const excelEpoch = new Date(1899, 11, 30);
+             const d = new Date(excelEpoch.getTime() + dateInput * 86400000);
+             return d.toLocaleDateString("en-GB", { year: "numeric", month: "short", day: "numeric" });
+          }
+
+          const d = new Date(dateInput);
+          return isNaN(d.getTime()) ? dateInput : d.toLocaleDateString("en-GB", { year: "numeric", month: "short", day: "numeric" });
+      };
+
+      const getEmployeeInitials = (name, isVacant = false) => {
+        if (isVacant) return "VC";
+        const initials = (name || "")
+          .split(" ")
+          .map((n) => n[0] || "")
+          .join("")
+          .toUpperCase();
+        return initials || "NA";
+      };
+
+      const flattenTreeNodes = (nodes) => {
+        const all = [];
+        const walk = (items) => {
+          items.forEach((item) => {
+            all.push(item);
+            if (item.subordinates?.length) walk(item.subordinates);
+          });
+        };
+        walk(nodes || []);
+        return all;
+      };
+
+      const chunkArray = (items, chunkSize) => {
+        const size = Math.max(1, chunkSize || 1);
+        const chunks = [];
+        for (let i = 0; i < (items || []).length; i += size) {
+          chunks.push(items.slice(i, i + size));
+        }
+        return chunks;
+      };
+
+      const normalizeTitleText = (value) => (value || "").toString().trim().toLowerCase();
+
+      const getCorporateTitleRank = (title) => {
+        const t = normalizeTitleText(title);
+        if (!t) return 99;
+        if (t.includes("chief")) return 1;
+        if (t.includes("head of")) return 2;
+        if (t.includes("team lead") || t.includes("expert")) return 3;
+        if (t.includes("senior professional")) return 4;
+        if (t.includes("professional")) return 5;
+        if (t.includes("support")) return 6;
+        if (t.includes("staff")) return 7;
+        return 99;
+      };
+
+      const compareCorporateTitle = (a, b) => {
+        const rankDiff = getCorporateTitleRank(a) - getCorporateTitleRank(b);
+        if (rankDiff !== 0) return rankDiff;
+        return a.localeCompare(b);
+      };
+
+      const HRIS_LOGO_REMOTE = "https://firebasestorage.googleapis.com/v0/b/cg-ses-files-upload.appspot.com/o/CardX%2Fhris-logo.png?alt=media&token=de32ed84-6123-4e15-8182-cbca973a3b3f";
+      const HRIS_LOGO_LOCAL = "./hris-logo.png";
+      const CARDX_LOGO_REMOTE = "https://firebasestorage.googleapis.com/v0/b/cg-ses-files-upload.appspot.com/o/CardX%2Fcardx_logo.png?alt=media&token=9f3e352f-dfd2-4bc6-abe6-158eb071a7c3";
+      const CARDX_LOGO_LOCAL = "./cardx_logo.png";
+      const CARDX_LOGO_INLINE = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAB9AAAAOuCAYAAABfX4zbAAAACXBIWXMAAAsSAAALEgHS3X78AAAgAElEQVR4nOzdT3NU95kv8C9T2d9e8MeIVE1nlWTm1h05Ntmp0iQzU7fujI38CiKqXwBiryqgqvfCL0Al+RUgjO0EjC25ehewJRsbOysrVXHuHcNC8wr6Ls5pEARQS0g6fU5/PlWnhOU2fmzUff58f8/zSwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA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AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwBb4f42q5X9e7p5vAAAAAElFTkSuQmCC";
+      const IS_FILE_ORIGIN = window.location.protocol === "file:";
+
+      const normalizeSearchText = (value) => {
+        return (value || "")
+          .toString()
+          .toLowerCase()
+          .normalize("NFKD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .replace(/[^a-z0-9ก-๙]+/g, " ")
+          .trim();
+      };
+
+      const buildSearchTokens = (query) => {
+        const normalizedQuery = normalizeSearchText(query);
+        if (!normalizedQuery) return [];
+        return normalizedQuery.split(/\s+/).filter(Boolean);
+      };
+
+      const matchesNodeSearch = (node, query) => {
+        const tokens = buildSearchTokens(query);
+        if (tokens.length === 0) return true;
+
+        const searchBlob = normalizeSearchText([
+          node.employeeId || node.id,
+          node.name,
+          node.position,
+          node.corporateTitle,
+          node.orgName,
+          node.groupName,
+          node.divisionName,
+          node.departmentName,
+          node.unitName
+        ].join(" "));
+
+        return tokens.every((token) => searchBlob.includes(token));
+      };
+
+      const compareEmployeePriority = (a, b) => {
+        const rankDiff = getCorporateTitleRank(a.corporateTitle || "") - getCorporateTitleRank(b.corporateTitle || "");
+        if (rankDiff !== 0) return rankDiff;
+        const nameA = (a.name || "").toString();
+        const nameB = (b.name || "").toString();
+        return nameA.localeCompare(nameB);
+      };
+
+      const isAssistantRole = (position) => {
+        const p = (position || "").toString().trim().toLowerCase();
+        return p.includes("assistant") || p.includes("secretary");
+      };
+
+      const compareReportOrder = (a, b) => {
+        const aAssistant = isAssistantRole(a.position);
+        const bAssistant = isAssistantRole(b.position);
+        if (aAssistant !== bAssistant) return bAssistant - aAssistant;
+        return compareEmployeePriority(a, b);
+      };
+
+      const buildEmployeeMap = (items) => {
+        const map = {};
+        (items || []).forEach((item) => { map[item.id] = item; });
+        return map;
+      };
+
+      const resolveNearestParentId = (item, parentIds, itemMap) => {
+        let cursorId = item?.manager_id;
+        const visited = new Set();
+        while (cursorId && !visited.has(cursorId)) {
+          if (parentIds.has(cursorId)) return cursorId;
+          visited.add(cursorId);
+          cursorId = itemMap[cursorId]?.manager_id;
+        }
+        return null;
+      };
+
+      const pickHeadsByKey = (items, key, preferredOrgType = "") => {
+        const grouped = new Map();
+        (items || []).forEach((item) => {
+          const bucketKey = (item[key] || "").toString().trim();
+          if (!bucketKey) return;
+          if (!grouped.has(bucketKey)) grouped.set(bucketKey, []);
+          grouped.get(bucketKey).push(item);
+        });
+
+        const heads = [];
+        grouped.forEach((bucket) => {
+          const bucketIds = new Set(bucket.map((item) => item.id));
+          const sorted = [...bucket].sort((a, b) => {
+            const aOrgMatch = (a.orgType || "").toLowerCase().includes(preferredOrgType);
+            const bOrgMatch = (b.orgType || "").toLowerCase().includes(preferredOrgType);
+            if (aOrgMatch !== bOrgMatch) return bOrgMatch - aOrgMatch;
+
+            const aManagerInside = !!(a.manager_id && bucketIds.has(a.manager_id));
+            const bManagerInside = !!(b.manager_id && bucketIds.has(b.manager_id));
+            if (aManagerInside !== bManagerInside) return aManagerInside - bManagerInside;
+
+            return compareEmployeePriority(a, b);
+          });
+          if (sorted[0]) heads.push(sorted[0]);
+        });
+
+        return heads.sort(compareEmployeePriority);
+      };
+
+      const EXPORT_BRAND_FONT = '"CardXBrand", "Segoe UI", Arial, sans-serif';
+
+      const ensureExportFontLoaded = async (fontSize = 16) => {
+        if (!document.fonts?.load) return;
+        try {
+          await Promise.all([
+            document.fonts.load(`400 ${fontSize}px ${EXPORT_BRAND_FONT}`),
+            document.fonts.load(`600 ${fontSize}px ${EXPORT_BRAND_FONT}`),
+            document.fonts.load(`700 ${fontSize}px ${EXPORT_BRAND_FONT}`),
+            document.fonts.ready
+          ]);
+        } catch (error) {
+          console.warn("Brand font load fallback:", error?.message || error);
+        }
+      };
+
+      const OrgChartVertical = () => {
+        const [treeData, setTreeData] = useState([]); 
+        const [selectedEmployee, setSelectedEmployee] = useState(null);
+        const [searchQuery, setSearchQuery] = useState("");
+        const [selectedGroup, setSelectedGroup] = useState("all");
+        const [selectedDivision, setSelectedDivision] = useState("all");
+        const [selectedDepartment, setSelectedDepartment] = useState("all");
+        const [selectedUnit, setSelectedUnit] = useState("all");
+        const [selectedCorporateTitle, setSelectedCorporateTitle] = useState("all");
+        const [zoomLevel, setZoomLevel] = useState(100);
+        const [expandedNodes, setExpandedNodes] = useState(new Set());
+        const [exportingType, setExportingType] = useState(null);
+        
+        const [isHandTool, setIsHandTool] = useState(false);
+        const [isPanning, setIsPanning] = useState(false);
+        const [startPan, setStartPan] = useState({ x: 0, y: 0, scrollLeft: 0, scrollTop: 0 });
+        const scrollContainerRef = useRef(null);
+
+        const getRelativeRectInContainer = (element, container) => {
+          let x = 0;
+          let y = 0;
+          let node = element;
+
+          while (node && node !== container) {
+            x += node.offsetLeft || 0;
+            y += node.offsetTop || 0;
+            node = node.offsetParent;
+          }
+
+          if (node !== container) {
+            const elementRect = element.getBoundingClientRect();
+            const containerRect = container.getBoundingClientRect();
+            return {
+              x: elementRect.left - containerRect.left,
+              y: elementRect.top - containerRect.top,
+              width: elementRect.width,
+              height: elementRect.height
+            };
+          }
+
+          return {
+            x,
+            y,
+            width: element.offsetWidth || 0,
+            height: element.offsetHeight || 0
+          };
+        };
+
+        const getTreeContentBounds = (container) => {
+          const cards = Array.from(container.querySelectorAll(".org-node > div:first-child")).filter((card) => {
+            if ((card.offsetWidth || 0) < 20 || (card.offsetHeight || 0) < 20) return false;
+            const nameText = card.querySelector("h3")?.textContent?.trim() || "";
+            const positionText = card.querySelector("p")?.textContent?.trim() || "";
+            return Boolean(nameText || positionText);
+          });
+          if (cards.length === 0) {
+            return { x: 0, y: 0, width: container.scrollWidth, height: container.scrollHeight };
+          }
+
+          let minX = Infinity;
+          let minY = Infinity;
+          let maxX = -Infinity;
+          let maxY = -Infinity;
+
+          cards.forEach((card) => {
+            const rect = getRelativeRectInContainer(card, container);
+            minX = Math.min(minX, rect.x);
+            minY = Math.min(minY, rect.y);
+            maxX = Math.max(maxX, rect.x + rect.width);
+            maxY = Math.max(maxY, rect.y + rect.height);
+          });
+
+          // Include connectors and a safe breathing room around cards.
+          const trimPadding = 80;
+          const x = Math.max(0, Math.floor(minX - trimPadding));
+          const y = Math.max(0, Math.floor(minY - trimPadding));
+          const width = Math.min(container.scrollWidth - x, Math.ceil((maxX - minX) + (trimPadding * 2)));
+          const height = Math.min(container.scrollHeight - y, Math.ceil((maxY - minY) + (trimPadding * 2)));
+
+          return { x, y, width: Math.max(1, width), height: Math.max(1, height) };
+        };
+
+        const loadImage = (src) => new Promise((resolve, reject) => {
+          const img = new Image();
+          const resolvedSrc = new URL(src, window.location.href).href;
+          const resolvedProtocol = new URL(resolvedSrc).protocol;
+          if (resolvedProtocol === "http:" || resolvedProtocol === "https:") {
+            img.crossOrigin = "anonymous";
+          }
+          img.onload = () => resolve(img);
+          img.onerror = () => reject(new Error(`Failed to load image: ${src}`));
+          img.src = resolvedSrc;
+        });
+
+        const loadFirstAvailableImage = async (sources) => {
+          let lastError = null;
+          for (const src of sources || []) {
+            try {
+              const img = await loadImage(src);
+              return { img, src };
+            } catch (error) {
+              lastError = error;
+            }
+          }
+          throw lastError || new Error("No available image sources");
+        };
+
+        const isImageCanvasSafe = (img) => {
+          try {
+            const testCanvas = document.createElement("canvas");
+            testCanvas.width = 1;
+            testCanvas.height = 1;
+            const testCtx = testCanvas.getContext("2d", { willReadFrequently: true });
+            testCtx.drawImage(img, 0, 0, 1, 1);
+            testCtx.getImageData(0, 0, 1, 1);
+            return true;
+          } catch (error) {
+            return false;
+          }
+        };
+
+        const loadFirstCanvasSafeImage = async (sources) => {
+          let lastError = null;
+          for (const src of sources || []) {
+            try {
+              const loaded = await loadFirstAvailableImage([src]);
+              if (!isImageCanvasSafe(loaded.img)) {
+                lastError = new Error(`Image source is not canvas-safe: ${src}`);
+                continue;
+              }
+              return loaded;
+            } catch (error) {
+              lastError = error;
+            }
+          }
+          throw lastError || new Error("No canvas-safe image sources");
+        };
+
+        const canvasToBlob = (canvas, mimeType, quality) => new Promise((resolve, reject) => {
+          canvas.toBlob((blob) => {
+            if (!blob || blob.size === 0) {
+              reject(new Error("Rendered image is empty. Please try export again."));
+              return;
+            }
+            resolve(blob);
+          }, mimeType, quality);
+        });
+
+        const assertCanvasExportSafe = (canvas) => {
+          try {
+            const ctx = canvas.getContext("2d", { willReadFrequently: true });
+            ctx.getImageData(0, 0, 1, 1);
+          } catch (error) {
+            throw new Error(
+              "Export blocked by browser security (cross-origin image). " +
+              "Please hard refresh and use inline/local assets only."
+            );
+          }
+        };
+
+        const getOpaqueImageBounds = (img) => {
+          const w = img.naturalWidth || img.width;
+          const h = img.naturalHeight || img.height;
+          const tempCanvas = document.createElement("canvas");
+          tempCanvas.width = w;
+          tempCanvas.height = h;
+          const tempCtx = tempCanvas.getContext("2d", { willReadFrequently: true });
+          tempCtx.drawImage(img, 0, 0, w, h);
+          let pixels;
+          try {
+            pixels = tempCtx.getImageData(0, 0, w, h).data;
+          } catch (error) {
+            // Cross-origin fallback: use full image bounds when pixel read is blocked.
+            return { sx: 0, sy: 0, sw: w, sh: h };
+          }
+
+          let minX = w;
+          let minY = h;
+          let maxX = -1;
+          let maxY = -1;
+
+          for (let y = 0; y < h; y += 1) {
+            for (let x = 0; x < w; x += 1) {
+              const alpha = pixels[((y * w) + x) * 4 + 3];
+              if (alpha > 8) {
+                if (x < minX) minX = x;
+                if (y < minY) minY = y;
+                if (x > maxX) maxX = x;
+                if (y > maxY) maxY = y;
+              }
+            }
+          }
+
+          if (maxX < minX || maxY < minY) {
+            return { sx: 0, sy: 0, sw: w, sh: h };
+          }
+
+          return {
+            sx: minX,
+            sy: minY,
+            sw: (maxX - minX) + 1,
+            sh: (maxY - minY) + 1
+          };
+        };
+
+        const drawWrappedText = (ctx, text, x, y, maxWidth, lineHeight, maxLines) => {
+          const words = text.split(/\s+/);
+          const lines = [];
+          let line = "";
+
+          words.forEach((word) => {
+            const nextLine = line ? `${line} ${word}` : word;
+            if (ctx.measureText(nextLine).width <= maxWidth) {
+              line = nextLine;
+            } else {
+              if (line) lines.push(line);
+              line = word;
+            }
+          });
+          if (line) lines.push(line);
+
+          const drawnLines = lines.slice(0, maxLines);
+          drawnLines.forEach((l, idx) => {
+            ctx.fillText(l, x, y + (idx * lineHeight));
+          });
+          return drawnLines.length;
+        };
+
+        const fitText = (ctx, text, maxWidth) => {
+          if (ctx.measureText(text).width <= maxWidth) return text;
+          let out = text;
+          while (out.length > 1 && ctx.measureText(`${out}...`).width > maxWidth) {
+            out = out.slice(0, -1);
+          }
+          return `${out}...`;
+        };
+
+        const getCurrentFilterLabel = () => {
+          if (selectedCorporateTitle !== "all") return selectedCorporateTitle;
+          if (selectedUnit !== "all") return selectedUnit;
+          if (selectedDepartment !== "all") return selectedDepartment;
+          if (selectedDivision !== "all") return selectedDivision;
+          if (selectedGroup !== "all") return selectedGroup;
+          return "All Organizations";
+        };
+
+        const drawCiOverlay = async (ctx, finalWidth, finalHeight, phase = "foreground") => {
+          const sidePadding = Math.round(finalWidth * 0.02);
+          const brandLeftX = Math.round(finalWidth * 0.015);
+          const topPadding = Math.round(finalHeight * 0.03);
+          const logoTopWidth = Math.round(finalWidth * 0.12);
+          const logoBottomWidth = Math.round(finalWidth * 0.09);
+          const dynamicLabel = getCurrentFilterLabel();
+          const dynamicText = searchQuery ? `${dynamicLabel} | Search: ${searchQuery}` : dynamicLabel;
+
+          if (phase === "background") {
+            const gradientWidth = Math.round(finalWidth * 0.35);
+            const gradientHeight = Math.round(finalHeight * 0.28);
+            const glowCenterX = finalWidth - (gradientWidth * 0.18);
+            const glowCenterY = finalHeight - (gradientHeight * 0.12);
+            const glowRadius = Math.round(Math.max(gradientWidth, gradientHeight) * 0.95);
+            const gradient = ctx.createRadialGradient(
+              glowCenterX,
+              glowCenterY,
+              0,
+              glowCenterX,
+              glowCenterY,
+              glowRadius
+            );
+            gradient.addColorStop(0, "rgba(61, 197, 236, 0.45)");
+            gradient.addColorStop(0.55, "rgba(61, 197, 236, 0.18)");
+            gradient.addColorStop(1, "rgba(61, 197, 236, 0)");
+            ctx.fillStyle = gradient;
+            ctx.beginPath();
+            ctx.ellipse(
+              glowCenterX,
+              glowCenterY,
+              gradientWidth * 0.9,
+              gradientHeight * 0.95,
+              0,
+              0,
+              Math.PI * 2
+            );
+            ctx.fill();
+            return;
+          }
+
+          let logoHeightTop = Math.round(logoTopWidth * 0.36);
+          let logoHeightBottom = Math.round(logoBottomWidth * 0.36);
+          try {
+            // Export must stay origin-clean. Always start from inline data URL,
+            // then local file fallback, and only then remote host.
+            const exportLogoSources = [CARDX_LOGO_INLINE, CARDX_LOGO_LOCAL, CARDX_LOGO_REMOTE];
+            const { img: logoImg } = await loadFirstCanvasSafeImage(exportLogoSources);
+            const logoBounds = getOpaqueImageBounds(logoImg);
+            const logoAspect = logoBounds.sw / Math.max(1, logoBounds.sh);
+            logoHeightTop = Math.round(logoTopWidth / Math.max(0.01, logoAspect));
+            logoHeightBottom = Math.round(logoBottomWidth / Math.max(0.01, logoAspect));
+            ctx.drawImage(
+              logoImg,
+              logoBounds.sx,
+              logoBounds.sy,
+              logoBounds.sw,
+              logoBounds.sh,
+              brandLeftX,
+              topPadding,
+              logoTopWidth,
+              logoHeightTop
+            );
+            const logoBottomX = finalWidth - sidePadding - logoBottomWidth;
+            const logoBottomY = finalHeight - Math.round(finalHeight * 0.04) - logoHeightBottom;
+            ctx.drawImage(
+              logoImg,
+              logoBounds.sx,
+              logoBounds.sy,
+              logoBounds.sw,
+              logoBounds.sh,
+              logoBottomX,
+              logoBottomY,
+              logoBottomWidth,
+              logoHeightBottom
+            );
+          } catch (logoError) {
+            console.warn(logoError.message);
+          }
+
+          const textX = brandLeftX;
+          const textY = topPadding + logoHeightTop + Math.round(finalHeight * 0.05);
+          const maxTextWidth = Math.round(finalWidth * 0.30);
+          const fontSize = Math.max(16, Math.round(finalHeight * 0.033));
+          const lineHeight = Math.round(fontSize * 1.15);
+          await ensureExportFontLoaded(fontSize);
+          ctx.fillStyle = "#56B0DE";
+          ctx.font = `700 ${fontSize}px ${EXPORT_BRAND_FONT}`;
+          ctx.textAlign = "left";
+          const drawnLineCount = drawWrappedText(ctx, dynamicText, textX, textY, maxTextWidth, lineHeight, 3);
+
+          const lineY = finalHeight - Math.round(finalHeight * 0.055);
+          const summaryStartY = textY + (Math.max(1, drawnLineCount) * lineHeight) + Math.round(finalHeight * 0.018);
+          const summaryWidth = Math.round(finalWidth * 0.19);
+          const summaryValueX = textX + summaryWidth;
+          const summaryHeaderSize = Math.max(12, Math.round(finalHeight * 0.0145));
+          const summaryRowSize = Math.max(11, Math.round(finalHeight * 0.0135));
+          const summaryRowHeight = Math.round(summaryRowSize * 1.45);
+          const tableValueLineHeight = Math.max(Math.round(summaryRowSize * 1.2), 14);
+          const vacantTitleText = vacantCorporateTitleSummary
+            .map((item) => `${item.title} (${item.total})`)
+            .join(", ");
+          const vacantDetailsText = vacantTitleText || "-";
+          const tableRows = [
+            { label: "Manpower", value: String(summaryTotals.manpower), color: "#334155", wrap: false },
+            { label: "Headcount", value: String(summaryTotals.headcount), color: "#334155", wrap: false },
+            { label: "Vacant", value: String(summaryTotals.vacant), color: "#7c2d12", wrap: false },
+            { label: "Vacant details", value: vacantDetailsText, color: "#7c2d12", wrap: true }
+          ];
+          const tableLeft = textX;
+          const tableTop = summaryStartY;
+          const tableWidth = Math.round(finalWidth * 0.24);
+          const tableSplitX = tableLeft + Math.round(tableWidth * 0.3);
+          const valueWidth = Math.max(40, tableLeft + tableWidth - tableSplitX - Math.round(finalWidth * 0.008));
+          const wrapValueLines = (value, maxWidth) => {
+            const words = (value || "").toString().split(/\s+/).filter(Boolean);
+            if (words.length === 0) return ["-"];
+            const lines = [];
+            let line = "";
+            words.forEach((word) => {
+              const candidate = line ? `${line} ${word}` : word;
+              if (ctx.measureText(candidate).width <= maxWidth) {
+                line = candidate;
+              } else {
+                if (line) lines.push(line);
+                line = word;
+              }
+            });
+            if (line) lines.push(line);
+            return lines;
+          };
+
+          const tableRowLayouts = tableRows.map((row) => {
+            ctx.font = `600 ${summaryRowSize}px ${EXPORT_BRAND_FONT}`;
+            const lines = row.wrap ? wrapValueLines(row.value, valueWidth) : [fitText(ctx, row.value, valueWidth)];
+            const minHeight = Math.max(Math.round(summaryHeaderSize * 1.55), Math.round(summaryRowSize * 1.65));
+            const wrappedHeight = Math.round(summaryRowSize * 0.9) + (lines.length * tableValueLineHeight);
+            const rowHeight = row.wrap ? Math.max(minHeight, wrappedHeight) : minHeight;
+            return { ...row, lines, rowHeight };
+          });
+
+          const tableBottom = tableTop + tableRowLayouts.reduce((sum, row) => sum + row.rowHeight, 0);
+          const summarySectionStartY = tableBottom + Math.round(summaryHeaderSize * 1.45);
+          const summaryAvailableHeight = Math.max(0, lineY - summarySectionStartY - Math.round(finalHeight * 0.015));
+          const maxRows = Math.max(0, Math.floor((summaryAvailableHeight - Math.round(summaryHeaderSize * 1.8)) / summaryRowHeight));
+          ctx.strokeStyle = "rgba(71, 85, 105, 0.65)";
+          ctx.lineWidth = Math.max(1, Math.round(finalHeight * 0.0011));
+          ctx.beginPath();
+          ctx.moveTo(tableLeft, tableTop);
+          ctx.lineTo(tableLeft + tableWidth, tableTop);
+          let rowBoundaryY = tableTop;
+          tableRowLayouts.forEach((row) => {
+            rowBoundaryY += row.rowHeight;
+            const rowY = rowBoundaryY;
+            ctx.moveTo(tableLeft, rowY);
+            ctx.lineTo(tableLeft + tableWidth, rowY);
+          });
+          ctx.moveTo(tableSplitX, tableTop);
+          ctx.lineTo(tableSplitX, tableBottom);
+          ctx.stroke();
+
+          let rowTop = tableTop;
+          tableRowLayouts.forEach((row) => {
+            const labelY = rowTop + Math.round(Math.min(row.rowHeight * 0.66, summaryHeaderSize * 1.95));
+            ctx.textAlign = "left";
+            ctx.fillStyle = "#475569";
+            ctx.font = `700 ${summaryHeaderSize}px ${EXPORT_BRAND_FONT}`;
+            ctx.fillText(`${row.label} :`, tableLeft + Math.round(finalWidth * 0.002), labelY);
+
+            ctx.fillStyle = row.color;
+            ctx.font = `600 ${summaryRowSize}px ${EXPORT_BRAND_FONT}`;
+            const valueStartX = tableSplitX + Math.round(finalWidth * 0.004);
+            const firstLineY = rowTop + Math.round(summaryRowSize * 1.15);
+            row.lines.forEach((lineText, lineIndex) => {
+              const lineYPos = firstLineY + (lineIndex * tableValueLineHeight);
+              ctx.fillText(lineText, valueStartX, lineYPos);
+            });
+            rowTop += row.rowHeight;
+          });
+
+          if (maxRows > 0 && corporateTitleSummary.length > 0) {
+            ctx.fillStyle = "#64748b";
+            ctx.font = `700 ${summaryHeaderSize}px ${EXPORT_BRAND_FONT}`;
+            ctx.fillText("Corporate Title Summary", textX, summarySectionStartY);
+
+            const rows = corporateTitleSummary.slice(0, maxRows);
+            const summaryTitleMaxWidth = Math.max(40, summaryWidth - Math.round(finalWidth * 0.028));
+            rows.forEach((row, idx) => {
+              const y = summarySectionStartY + Math.round(summaryHeaderSize * 1.5) + (idx * summaryRowHeight);
+              ctx.fillStyle = "#475569";
+              ctx.font = `600 ${summaryRowSize}px ${EXPORT_BRAND_FONT}`;
+              const rowLabel = fitText(ctx, row.title, summaryTitleMaxWidth);
+              ctx.fillText(rowLabel, textX, y);
+              ctx.textAlign = "right";
+              ctx.fillStyle = "#334155";
+              ctx.fillText(String(row.total), summaryValueX, y);
+              ctx.textAlign = "left";
+            });
+          }
+          const lineStartX = brandLeftX;
+          const lineEndX = finalWidth - sidePadding - logoBottomWidth - Math.round(finalWidth * 0.03);
+          ctx.strokeStyle = "#4F4F4F";
+          ctx.lineWidth = Math.max(4, Math.round(finalHeight * 0.0045));
+          ctx.beginPath();
+          ctx.moveTo(lineStartX, lineY);
+          ctx.lineTo(lineEndX, lineY);
+          ctx.stroke();
+        };
+
+        const captureExportCanvas = async (container, type) => {
+          const isExportAllScope = selectedGroup === "all"
+            && selectedDivision === "all"
+            && selectedDepartment === "all"
+            && selectedUnit === "all"
+            && selectedCorporateTitle === "all"
+            && !searchQuery.trim();
+          const isScopedExport = !isExportAllScope;
+          const nodeCount = container.querySelectorAll(".org-node").length;
+          const baseWidth = type === "pdf"
+            ? (isScopedExport ? 4600 : 3800)
+            : (isScopedExport ? 5600 : 4600);
+          const densityMultiplier = nodeCount > 120 ? 1.4 : nodeCount > 60 ? 1.2 : 1;
+          const scopeBoost = isExportAllScope ? 1.12 : 1.24;
+          const baseExportWidth = Math.min(9000, Math.round(baseWidth * densityMultiplier * scopeBoost));
+          const baseScale = type === "pdf" ? (isExportAllScope ? 3.4 : 3) : (isExportAllScope ? 4 : 3.5);
+          const safeScale = nodeCount > 220
+            ? Math.min(baseScale, 3.2)
+            : nodeCount > 140
+              ? Math.min(baseScale, 3.5)
+              : baseScale;
+          const MAX_CAPTURE_PIXELS = isExportAllScope ? 48_000_000 : 36_000_000;
+          const PRINT_MARGIN_INCH = 0.7;
+          const BASE_DPI = 96;
+          const marginPx = Math.round(PRINT_MARGIN_INCH * BASE_DPI);
+          const width = container.scrollWidth;
+          const height = container.scrollHeight;
+          const contentBounds = getTreeContentBounds(container);
+          const captureX = Math.max(0, Math.floor(contentBounds.x));
+          const captureY = Math.max(0, Math.floor(contentBounds.y));
+          const captureWidth = Math.max(1, Math.ceil(contentBounds.width));
+          const captureHeight = Math.max(1, Math.ceil(contentBounds.height));
+          const captureArea = Math.max(1, captureWidth * captureHeight);
+          const scaleCapByArea = Math.sqrt(MAX_CAPTURE_PIXELS / captureArea);
+          const minBoundedScale = isExportAllScope ? 0.9 : 0.7;
+          const boundedScale = Math.max(minBoundedScale, Math.min(safeScale, scaleCapByArea));
+          await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const canvas = await html2canvas(container, {
+            scale: boundedScale,
+            useCORS: window.location.protocol !== "file:",
+            backgroundColor: "#f8fafc",
+            logging: false,
+            x: captureX,
+            y: captureY,
+            width: captureWidth,
+            height: captureHeight,
+            windowWidth: width,
+            windowHeight: height,
+            onclone: (clonedDoc) => {
+              const clonedTree = clonedDoc.querySelector(".org-tree");
+              if (clonedTree) {
+                clonedTree.style.transform = "none";
+                clonedTree.style.padding = "0";
+              }
+              const clonedViewport = clonedDoc.querySelector(".org-export-viewport");
+              if (clonedViewport) {
+                clonedViewport.style.transform = "none";
+                clonedViewport.style.transformOrigin = "top center";
+              }
+              const cards = clonedDoc.querySelectorAll(".animate-in");
+              cards.forEach(card => {
+                card.style.opacity = "1";
+                card.style.transform = "none";
+                card.style.animation = "none";
+                card.style.visibility = "visible";
+              });
+
+              // Remove accidental blank nodes before render to avoid gray placeholder blocks.
+              const clonedCards = Array.from(clonedDoc.querySelectorAll(".org-node > div:first-child"));
+              clonedCards.forEach((card) => {
+                const nameText = card.querySelector("h3")?.textContent?.trim() || "";
+                const positionText = card.querySelector("p")?.textContent?.trim() || "";
+                if (!nameText && !positionText) {
+                  card.closest(".org-node")?.remove();
+                }
+              });
+
+              // html2canvas can shift tiny text baseline downward in badges/avatars.
+              const clonedAvatars = clonedDoc.querySelectorAll(".export-avatar, .export-modal-avatar");
+              clonedAvatars.forEach((avatar) => {
+                avatar.style.display = "flex";
+                avatar.style.alignItems = "center";
+                avatar.style.justifyContent = "center";
+              });
+
+              const clonedAvatarTexts = clonedDoc.querySelectorAll(".export-avatar-text");
+              clonedAvatarTexts.forEach((t) => {
+                t.style.display = "block";
+                t.style.lineHeight = "1";
+                t.style.transform = "translateY(-1px)";
+                if (!((t.textContent || "").trim())) {
+                  t.parentElement?.style.setProperty("display", "none");
+                }
+              });
+
+              const clonedBadges = clonedDoc.querySelectorAll(".export-org-badge");
+              clonedBadges.forEach((badge) => {
+                badge.style.display = "inline-flex";
+                badge.style.alignItems = "center";
+                badge.style.justifyContent = "center";
+                badge.style.lineHeight = "1";
+              });
+
+              const clonedBadgeTexts = clonedDoc.querySelectorAll(".export-org-badge-text");
+              clonedBadgeTexts.forEach((t) => {
+                t.style.display = "block";
+                t.style.lineHeight = "1";
+                t.style.transform = "translateY(-1px)";
+              });
+            }
+          });
+
+          const croppedCanvas = document.createElement('canvas');
+          croppedCanvas.width = Math.max(1, canvas.width);
+          croppedCanvas.height = Math.max(1, canvas.height);
+          const croppedCtx = croppedCanvas.getContext('2d');
+          croppedCtx.drawImage(canvas, 0, 0);
+
+          const contentAspect = croppedCanvas.width / Math.max(1, croppedCanvas.height);
+          const minReadableHeight = type === "pdf"
+            ? (isExportAllScope ? 2100 : 2400)
+            : (isExportAllScope ? 2300 : 2700);
+          const widthNeededForReadableHeight = Math.ceil((minReadableHeight * contentAspect) + (marginPx * 2));
+          const maxExportWidth = type === "pdf"
+            ? (isExportAllScope ? 9600 : 12000)
+            : (isExportAllScope ? 11000 : 13500);
+          const maxFinalPixels = type === "pdf"
+            ? (isExportAllScope ? 40_000_000 : 32_000_000)
+            : (isExportAllScope ? 48_000_000 : 42_000_000);
+          let exportWidth = Math.min(maxExportWidth, Math.max(baseExportWidth, widthNeededForReadableHeight));
+          let exportHeight = Math.round(exportWidth * 9 / 16);
+          const finalArea = Math.max(1, exportWidth * exportHeight);
+          if (finalArea > maxFinalPixels) {
+            const shrink = Math.sqrt(maxFinalPixels / finalArea);
+            exportWidth = Math.max(1920, Math.floor(exportWidth * shrink));
+            exportHeight = Math.max(1080, Math.floor(exportHeight * shrink));
+          }
+          const EXPORT_WIDTH = exportWidth;
+          const EXPORT_HEIGHT = exportHeight;
+
+          const finalCanvas = document.createElement('canvas');
+          finalCanvas.width = EXPORT_WIDTH;
+          finalCanvas.height = EXPORT_HEIGHT;
+          const ctx = finalCanvas.getContext('2d');
+          const layout = isExportAllScope
+            ? { top: 0.12, bottom: 0.1, left: 0.11, right: 0.08, zoomBoost: 1.32 }
+            : nodeCount <= 90
+              ? { top: 0.1, bottom: 0.11, left: 0.09, right: 0.08, zoomBoost: 1.32 }
+              : { top: 0.12, bottom: 0.1, left: 0.1, right: 0.08, zoomBoost: 1.24 };
+          const reservedTop = Math.round(EXPORT_HEIGHT * layout.top);
+          const reservedBottom = Math.round(EXPORT_HEIGHT * layout.bottom);
+          const reservedLeft = Math.round(EXPORT_WIDTH * layout.left);
+          const reservedRight = Math.round(EXPORT_WIDTH * layout.right);
+          const innerX = marginPx + reservedLeft;
+          const innerY = marginPx + reservedTop;
+          const innerWidth = Math.max(1, EXPORT_WIDTH - innerX - marginPx - reservedRight);
+          const innerHeight = Math.max(1, EXPORT_HEIGHT - innerY - marginPx - reservedBottom);
+          const fitScale = Math.min(innerWidth / croppedCanvas.width, innerHeight / croppedCanvas.height);
+          let drawWidth = croppedCanvas.width * fitScale * layout.zoomBoost;
+          let drawHeight = croppedCanvas.height * fitScale * layout.zoomBoost;
+          const maxDrawWidth = Math.max(1, innerWidth);
+          const maxDrawHeight = Math.max(1, innerHeight);
+          if (drawWidth > maxDrawWidth || drawHeight > maxDrawHeight) {
+            const clampScale = Math.min(maxDrawWidth / drawWidth, maxDrawHeight / drawHeight);
+            drawWidth *= clampScale;
+            drawHeight *= clampScale;
+          }
+          const innerCenterX = innerX + (innerWidth / 2);
+          const innerCenterY = innerY + (innerHeight / 2);
+          let offsetX = innerCenterX - (drawWidth / 2);
+          let offsetY = innerCenterY - (drawHeight / 2);
+          offsetX = Math.min(innerX + innerWidth - drawWidth, Math.max(innerX, offsetX));
+          offsetY = Math.min(innerY + innerHeight - drawHeight, Math.max(innerY, offsetY));
+
+          ctx.fillStyle = "#f8fafc";
+          ctx.fillRect(0, 0, EXPORT_WIDTH, EXPORT_HEIGHT);
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = "high";
+          await drawCiOverlay(ctx, EXPORT_WIDTH, EXPORT_HEIGHT, "background");
+          ctx.drawImage(croppedCanvas, offsetX, offsetY, drawWidth, drawHeight);
+          await drawCiOverlay(ctx, EXPORT_WIDTH, EXPORT_HEIGHT, "foreground");
+
+          // Free large intermediate buffers as soon as final canvas is ready.
+          canvas.width = 1;
+          canvas.height = 1;
+          croppedCanvas.width = 1;
+          croppedCanvas.height = 1;
+
+          return { finalCanvas, finalWidth: EXPORT_WIDTH, finalHeight: EXPORT_HEIGHT };
+        };
+
+        const handleExport = async (type) => {
+          const container = document.querySelector(".org-tree");
+          if (!container || treeData.length === 0 || exportingType) return;
+          setExportingType(type);
+
+          try {
+            const { finalCanvas, finalWidth, finalHeight } = await captureExportCanvas(container, type);
+            const timestamp = new Date().getTime();
+            assertCanvasExportSafe(finalCanvas);
+
+            if (type === "png") {
+              const pngBlob = await canvasToBlob(finalCanvas, "image/png");
+              const objectUrl = URL.createObjectURL(pngBlob);
+              const link = document.createElement("a");
+              link.href = objectUrl;
+              link.download = `CardX_Full_OrgChart_${timestamp}.png`;
+              link.click();
+              setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+              finalCanvas.width = 1;
+              finalCanvas.height = 1;
+            } else {
+              const { jsPDF } = window.jspdf;
+              const pdf = new jsPDF({
+                orientation: "landscape",
+                unit: "px",
+                format: [finalWidth, finalHeight],
+                compress: true,
+                putOnlyUsedFonts: true
+              });
+              pdf.addImage(finalCanvas, "PNG", 0, 0, finalWidth, finalHeight);
+              pdf.save(`CardX_Full_OrgChart_${timestamp}.pdf`);
+              finalCanvas.width = 1;
+              finalCanvas.height = 1;
+            }
+          } catch (error) {
+            console.error("Export Error:", error);
+            alert("Export failed: " + error.message);
+          } finally {
+            setExportingType(null);
+          }
+        };
+
+        const handleMouseDown = (e) => {
+          if (!isHandTool) return;
+          setIsPanning(true);
+          const container = scrollContainerRef.current;
+          setStartPan({
+            x: e.pageX - container.offsetLeft,
+            y: e.pageY - container.offsetTop,
+            scrollLeft: container.scrollLeft,
+            scrollTop: container.scrollTop
+          });
+        };
+
+        const handleMouseMove = (e) => {
+          if (!isPanning || !isHandTool) return;
+          e.preventDefault();
+          const container = scrollContainerRef.current;
+          const x = e.pageX - container.offsetLeft;
+          const y = e.pageY - container.offsetTop;
+          const walkX = (x - startPan.x) * 1.5;
+          const walkY = (y - startPan.y) * 1.5;
+          container.scrollLeft = startPan.scrollLeft - walkX;
+          container.scrollTop = startPan.scrollTop - walkY;
+        };
+
+        const handleMouseUp = () => { setIsPanning(false); };
+
+        // [MODIFIED] Handle both CSV and Excel
+        const handleFileUpload = (event) => {
+          const file = event.target.files[0];
+          if (!file) return;
+
+          const fileExt = file.name.split('.').pop().toLowerCase();
+          
+          const processData = (rawData) => {
+             if (rawData.length > 0) {
+                 // Check valid data
+                 const firstRow = rawData[0];
+                 const hasId = Object.keys(firstRow).some(k => k.trim() === "Employee ID CardX");
+                 
+                 if (!hasId) { 
+                     alert("Format ไม่ถูกต้อง: ไม่พบ column 'Employee ID CardX'"); 
+                     return; 
+                 }
+                 const hierarchy = buildHierarchy(rawData);
+                 setTreeData(hierarchy);
+                 const rootIds = hierarchy.map(n => n.id);
+                 setExpandedNodes(new Set(rootIds));
+                 setSelectedGroup("all");
+                 setSelectedDivision("all");
+                 setSelectedDepartment("all");
+                 setSelectedUnit("all");
+                 setSelectedCorporateTitle("all");
+                 setSearchQuery("");
+             }
+          };
+
+          if (fileExt === 'csv') {
+            // Process CSV with PapaParse
+            Papa.parse(file, {
+              header: true, skipEmptyLines: true,
+              complete: (results) => processData(results.data)
+            });
+          } else if (['xlsx', 'xls'].includes(fileExt)) {
+            // Process Excel with SheetJS
+            const reader = new FileReader();
+            reader.onload = (e) => {
+              const data = new Uint8Array(e.target.result);
+              const workbook = XLSX.read(data, { type: 'array' });
+              
+              // Get first sheet
+              const firstSheetName = workbook.SheetNames[0];
+              const worksheet = workbook.Sheets[firstSheetName];
+              
+              // Convert to JSON (raw: false ensures dates are formatted closer to display string, or handle in formatDate)
+              const jsonData = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
+              processData(jsonData);
+            };
+            reader.readAsArrayBuffer(file);
+          } else {
+             alert("รองรับเฉพาะไฟล์ .csv, .xlsx, .xls เท่านั้น");
+          }
+        };
+
+        const allEmployees = useMemo(() => flattenTreeNodes(treeData), [treeData]);
+
+        const getUniqueOptions = (items, key, sorter) => {
+          const values = Array.from(
+            new Set(
+              items
+                .map((item) => (item[key] || "").toString().trim())
+                .filter(Boolean)
+            )
+          );
+          return sorter ? values.sort(sorter) : values.sort((a, b) => a.localeCompare(b));
+        };
+
+        const groupOptions = useMemo(() => getUniqueOptions(allEmployees, "groupName"), [allEmployees]);
+        const corporateTitleOptions = useMemo(
+          () => getUniqueOptions(allEmployees, "corporateTitle", compareCorporateTitle),
+          [allEmployees]
+        );
+        const divisionOptions = useMemo(() => {
+          const scoped = selectedGroup === "all"
+            ? allEmployees
+            : allEmployees.filter((item) => item.groupName === selectedGroup);
+          return getUniqueOptions(scoped, "divisionName");
+        }, [allEmployees, selectedGroup]);
+        const departmentOptions = useMemo(() => {
+          const scoped = allEmployees.filter((item) => {
+            if (selectedGroup !== "all" && item.groupName !== selectedGroup) return false;
+            if (selectedDivision !== "all" && item.divisionName !== selectedDivision) return false;
+            return true;
+          });
+          return getUniqueOptions(scoped, "departmentName");
+        }, [allEmployees, selectedGroup, selectedDivision]);
+        const unitOptions = useMemo(() => {
+          const scoped = allEmployees.filter((item) => {
+            if (selectedGroup !== "all" && item.groupName !== selectedGroup) return false;
+            if (selectedDivision !== "all" && item.divisionName !== selectedDivision) return false;
+            if (selectedDepartment !== "all" && item.departmentName !== selectedDepartment) return false;
+            return true;
+          });
+          return getUniqueOptions(scoped, "unitName");
+        }, [allEmployees, selectedGroup, selectedDivision, selectedDepartment]);
+
+        useEffect(() => {
+          if (selectedDivision !== "all" && !divisionOptions.includes(selectedDivision)) {
+            setSelectedDivision("all");
+          }
+        }, [selectedDivision, divisionOptions]);
+
+        useEffect(() => {
+          if (selectedDepartment !== "all" && !departmentOptions.includes(selectedDepartment)) {
+            setSelectedDepartment("all");
+          }
+        }, [selectedDepartment, departmentOptions]);
+
+        useEffect(() => {
+          if (selectedUnit !== "all" && !unitOptions.includes(selectedUnit)) {
+            setSelectedUnit("all");
+          }
+        }, [selectedUnit, unitOptions]);
+
+        useEffect(() => {
+          if (selectedCorporateTitle !== "all" && !corporateTitleOptions.includes(selectedCorporateTitle)) {
+            setSelectedCorporateTitle("all");
+          }
+        }, [selectedCorporateTitle, corporateTitleOptions]);
+
+        const matchesHierarchyFilter = (node) => {
+          if (selectedGroup !== "all" && node.groupName !== selectedGroup) return false;
+          if (selectedDivision !== "all" && node.divisionName !== selectedDivision) return false;
+          if (selectedDepartment !== "all" && node.departmentName !== selectedDepartment) return false;
+          if (selectedUnit !== "all" && node.unitName !== selectedUnit) return false;
+          if (selectedCorporateTitle !== "all" && node.corporateTitle !== selectedCorporateTitle) return false;
+          return true;
+        };
+
+        const filterNodes = (nodes, query) => {
+          return nodes.reduce((acc, node) => {
+            const matchesSearch = matchesNodeSearch(node, query);
+            const matchesOrg = matchesHierarchyFilter(node);
+            const filteredSubordinates = node.subordinates ? filterNodes(node.subordinates, query) : [];
+            if ((matchesSearch && matchesOrg) || filteredSubordinates.length > 0) {
+              acc.push({ ...node, subordinates: filteredSubordinates });
+            }
+            return acc;
+          }, []);
+        };
+
+        const hasHierarchyFilters = selectedGroup !== "all"
+          || selectedDivision !== "all"
+          || selectedDepartment !== "all"
+          || selectedUnit !== "all"
+          || selectedCorporateTitle !== "all";
+        const isAllScopeView = !hasHierarchyFilters && !searchQuery.trim();
+        const shouldGroupFocusView = !searchQuery.trim()
+          && selectedGroup !== "all"
+          && selectedDivision === "all"
+          && selectedDepartment === "all"
+          && selectedUnit === "all"
+          && selectedCorporateTitle === "all";
+        const shouldDivisionFocusView = !searchQuery.trim()
+          && selectedDivision !== "all"
+          && selectedDepartment === "all"
+          && selectedUnit === "all"
+          && selectedCorporateTitle === "all";
+
+        const baseFilteredEmployees = useMemo(() => {
+          if (!searchQuery && !hasHierarchyFilters) return treeData;
+          return filterNodes(treeData, searchQuery);
+        }, [treeData, searchQuery, selectedGroup, selectedDivision, selectedDepartment, selectedUnit, selectedCorporateTitle, hasHierarchyFilters]);
+
+        const filteredEmployees = useMemo(() => {
+          if (!shouldGroupFocusView && !shouldDivisionFocusView) return baseFilteredEmployees;
+
+          const scopedFlat = allEmployees.filter((employee) => matchesHierarchyFilter(employee));
+          if (scopedFlat.length === 0) return [];
+          const scopedMap = buildEmployeeMap(scopedFlat);
+
+          if (shouldGroupFocusView) {
+            const nonAssistantScoped = scopedFlat.filter((employee) => !isAssistantRole(employee.position));
+            let groupHeads = pickHeadsByKey(nonAssistantScoped, "groupName", "group")
+              .filter((employee) => selectedGroup === "all" || employee.groupName === selectedGroup);
+            if (groupHeads.length === 0) {
+              groupHeads = nonAssistantScoped
+                .filter((employee) => !employee.manager_id || !scopedMap[employee.manager_id])
+                .sort(compareEmployeePriority);
+            }
+
+            const scopedAssistants = scopedFlat.filter((employee) => isAssistantRole(employee.position));
+            const assistantByGroupHead = new Map(
+              groupHeads.map((groupHead) => [
+                groupHead.id,
+                scopedAssistants
+                  .filter((employee) => employee.manager_id === groupHead.id)
+                  .map((employee) => ({ ...employee, subordinates: [] }))
+                  .sort(compareReportOrder)
+              ])
+            );
+
+            const divisionHeads = pickHeadsByKey(
+              nonAssistantScoped,
+              "divisionName",
+              "division"
+            );
+            if (groupHeads.length === 0) {
+              return divisionHeads.map((divisionHead) => ({ ...divisionHead, subordinates: [] }));
+            }
+
+            const groupHeadIds = new Set(groupHeads.map((head) => head.id));
+            const fallbackHeadId = groupHeads[0]?.id;
+            const groupedDivisionChildren = new Map(groupHeads.map((head) => [head.id, []]));
+
+            divisionHeads.forEach((divisionHead) => {
+              if (!divisionHead || groupHeadIds.has(divisionHead.id)) return;
+              const nearestGroupHeadId = resolveNearestParentId(divisionHead, groupHeadIds, scopedMap) || fallbackHeadId;
+              if (!nearestGroupHeadId) return;
+              groupedDivisionChildren.get(nearestGroupHeadId).push({ ...divisionHead, subordinates: [] });
+            });
+
+            return groupHeads
+              .sort(compareEmployeePriority)
+              .map((groupHead) => ({
+                ...groupHead,
+                subordinates: [
+                  ...(assistantByGroupHead.get(groupHead.id) || []),
+                  ...((groupedDivisionChildren.get(groupHead.id) || []).sort(compareEmployeePriority))
+                ]
+              }));
+          }
+
+          let divisionHeads = pickHeadsByKey(
+            scopedFlat.filter((employee) => !isAssistantRole(employee.position)),
+            "divisionName",
+            "division"
+          )
+            .filter((employee) => employee.divisionName === selectedDivision);
+          if (divisionHeads.length === 0) {
+            divisionHeads = scopedFlat
+              .filter((employee) => !employee.manager_id || !scopedMap[employee.manager_id])
+              .sort(compareEmployeePriority);
+          }
+          if (divisionHeads.length === 0) return [];
+
+          const departmentHeads = pickHeadsByKey(scopedFlat, "departmentName", "department");
+          const unitHeads = pickHeadsByKey(scopedFlat, "unitName", "unit");
+
+          const divisionIds = new Set(divisionHeads.map((item) => item.id));
+          const departmentIds = new Set(departmentHeads.map((item) => item.id));
+          const fallbackDivisionId = divisionHeads[0]?.id;
+
+          const departmentsByDivision = new Map(divisionHeads.map((divisionHead) => [divisionHead.id, []]));
+          departmentHeads.forEach((departmentHead) => {
+            const divisionId = resolveNearestParentId(departmentHead, divisionIds, scopedMap) || fallbackDivisionId;
+            if (!divisionId) return;
+            departmentsByDivision.get(divisionId).push(departmentHead);
+          });
+
+          const unitsByDepartment = new Map(departmentHeads.map((departmentHead) => [departmentHead.id, []]));
+          const unitsByDivision = new Map(divisionHeads.map((divisionHead) => [divisionHead.id, []]));
+          unitHeads.forEach((unitHead) => {
+            const departmentId = resolveNearestParentId(unitHead, departmentIds, scopedMap);
+            if (departmentId) {
+              unitsByDepartment.get(departmentId).push({ ...unitHead, subordinates: [] });
+              return;
+            }
+            const divisionId = resolveNearestParentId(unitHead, divisionIds, scopedMap) || fallbackDivisionId;
+            if (!divisionId) return;
+            unitsByDivision.get(divisionId).push({ ...unitHead, subordinates: [] });
+          });
+
+          const departmentCloneMap = new Map(
+            departmentHeads.map((departmentHead) => [
+              departmentHead.id,
+              {
+                ...departmentHead,
+                subordinates: (unitsByDepartment.get(departmentHead.id) || []).sort(compareEmployeePriority)
+              }
+            ])
+          );
+
+          return divisionHeads
+            .sort(compareEmployeePriority)
+            .map((divisionHead) => {
+              const assistantNodes = scopedFlat
+                .filter((employee) => isAssistantRole(employee.position) && employee.manager_id === divisionHead.id)
+                .map((employee) => ({ ...employee, subordinates: [] }))
+                .sort(compareReportOrder);
+              const departmentNodes = (departmentsByDivision.get(divisionHead.id) || [])
+                .map((departmentHead) => departmentCloneMap.get(departmentHead.id))
+                .filter(Boolean);
+              const unitNodes = (unitsByDivision.get(divisionHead.id) || []).sort(compareEmployeePriority);
+              return {
+                ...divisionHead,
+                subordinates: [...assistantNodes, ...departmentNodes, ...unitNodes].sort(compareReportOrder)
+              };
+            });
+        }, [
+          baseFilteredEmployees,
+          allEmployees,
+          searchQuery,
+          shouldGroupFocusView,
+          shouldDivisionFocusView,
+          selectedDivision,
+          selectedGroup,
+          selectedDepartment,
+          selectedUnit,
+          selectedCorporateTitle
+        ]);
+
+        const displayFlatEmployees = useMemo(() => flattenTreeNodes(filteredEmployees), [filteredEmployees]);
+        const useWrappedLayout = false;
+        const summaryFlatEmployees = useMemo(() => {
+          return allEmployees.filter((employee) => matchesHierarchyFilter(employee) && matchesNodeSearch(employee, searchQuery));
+        }, [
+          allEmployees,
+          searchQuery,
+          selectedGroup,
+          selectedDivision,
+          selectedDepartment,
+          selectedUnit,
+          selectedCorporateTitle
+        ]);
+        const summaryTotals = useMemo(() => {
+          const manpower = summaryFlatEmployees.length;
+          const headcount = summaryFlatEmployees.filter((employee) => !employee.isVacant).length;
+          const vacant = manpower - headcount;
+          return { manpower, headcount, vacant };
+        }, [summaryFlatEmployees]);
+
+        const corporateTitleSummary = useMemo(() => {
+          const titleMap = new Map();
+          summaryFlatEmployees.forEach((employee) => {
+            const title = (employee.corporateTitle || "Not Specified").toString().trim() || "Not Specified";
+            titleMap.set(title, (titleMap.get(title) || 0) + 1);
+          });
+
+          return Array.from(titleMap.entries())
+            .map(([title, total]) => ({ title, total }))
+            .sort((a, b) =>
+              (getCorporateTitleRank(a.title) - getCorporateTitleRank(b.title))
+              || (b.total - a.total)
+              || a.title.localeCompare(b.title)
+            );
+        }, [summaryFlatEmployees]);
+
+        const vacantCorporateTitleSummary = useMemo(() => {
+          const titleMap = new Map();
+          summaryFlatEmployees
+            .filter((employee) => employee.isVacant)
+            .forEach((employee) => {
+              const title = (employee.corporateTitle || "Not Specified").toString().trim() || "Not Specified";
+              titleMap.set(title, (titleMap.get(title) || 0) + 1);
+            });
+
+          return Array.from(titleMap.entries())
+            .map(([title, total]) => ({ title, total }))
+            .sort((a, b) =>
+              (getCorporateTitleRank(a.title) - getCorporateTitleRank(b.title))
+              || (b.total - a.total)
+              || a.title.localeCompare(b.title)
+            );
+        }, [summaryFlatEmployees]);
+
+        const handleClearFilters = () => {
+          setSearchQuery("");
+          setSelectedGroup("all");
+          setSelectedDivision("all");
+          setSelectedDepartment("all");
+          setSelectedUnit("all");
+          setSelectedCorporateTitle("all");
+        };
+
+        const handleExpandAll = () => {
+            const allIds = new Set();
+            const traverse = (nodes) => {
+                nodes.forEach(n => {
+                    allIds.add(n.id);
+                    if(n.subordinates) traverse(n.subordinates);
+                });
+            }
+            traverse(filteredEmployees);
+            setExpandedNodes(allIds);
+        }
+
+        const handleCollapseAll = () => {
+            const rootIds = treeData.map(n => n.id);
+            setExpandedNodes(new Set(rootIds));
+        }
+
+        useEffect(() => {
+          if (searchQuery || hasHierarchyFilters) {
+            handleExpandAll();
+          }
+        }, [searchQuery, hasHierarchyFilters, filteredEmployees]);
+
+        const toggleNode = (nodeId) => {
+          setExpandedNodes((prev) => {
+            const next = new Set(prev);
+            if (next.has(nodeId)) next.delete(nodeId); else next.add(nodeId);
+            return next;
+          });
+        };
+
+        const EmployeeCard = ({ employee, level = 0, useWrappedLayout = false }) => {
+          const hasSubordinates = employee.subordinates && employee.subordinates.length > 0;
+          const isExpanded = expandedNodes.has(employee.id);
+          const badgeClass = getOrgBadgeColor(employee.orgType);
+          const isVacant = !!employee.isVacant;
+          const avatarText = getEmployeeInitials(employee.name, isVacant);
+          const cardWidthClass = useWrappedLayout ? "w-72" : "w-64";
+          const wrappedRows = useWrappedLayout ? chunkArray(employee.subordinates || [], 4) : [];
+          const cardClass = isVacant
+            ? "border-amber-300 bg-amber-50/40 shadow-sm"
+            : (level === 0 ? "border-blue-600 shadow-md" : "border-slate-200 hover:border-slate-300 hover:shadow-md");
+          const avatarClass = isVacant ? "bg-amber-500" : (level === 0 ? "bg-blue-600" : "bg-slate-600");
+          const displayName = isVacant ? "Vacant" : (employee.name || "-");
+
+          return (
+            <div className="org-node">
+              <div
+                className={`
+                  bg-white rounded-lg shadow-sm border-2 transition-all duration-200 relative z-20
+                  cursor-pointer group ${cardWidthClass} animate-in
+                  ${cardClass}
+                `}
+                onClick={() => !isPanning && setSelectedEmployee(employee)}
+              >
+                <div className="p-4">
+                  <div className="flex items-start gap-3">
+                    <div className={`export-avatar w-10 h-10 rounded-lg grid place-items-center font-semibold text-white text-xs leading-none flex-shrink-0 ${avatarClass}`}>
+                      <span className="export-avatar-text">{avatarText}</span>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <h3 className="font-semibold text-slate-900 text-sm leading-tight break-words">{displayName}</h3>
+                      <p className="text-xs text-slate-600 mt-0.5 leading-tight break-words whitespace-normal">{employee.position}</p>
+                      {isVacant && (
+                        <span className="inline-flex mt-1 px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] font-bold uppercase tracking-wide">
+                          Vacant
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="mt-3 pt-2 border-t border-slate-100 flex flex-col gap-1">
+                    <div className="flex justify-between items-center">
+                       <span className={`export-org-badge inline-grid place-items-center h-5 px-2 rounded text-[9px] leading-none font-bold border uppercase tracking-wider ${badgeClass}`}>
+                         <span className="export-org-badge-text">{employee.orgType || "N/A"}</span>
+                       </span>
+                       <span className="text-[10px] text-slate-400">{formatDate(employee.hireDate)}</span>
+                    </div>
+                    <div className="flex flex-col">
+                        {employee.groupName && employee.groupName !== employee.orgName && (
+                            <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wide whitespace-normal break-words">{employee.groupName}</span>
+                        )}
+                        <span className="text-xs font-medium text-slate-700 whitespace-normal break-words" title={employee.orgName}>{employee.orgName}</span>
+                    </div>
+                  </div>
+                  {hasSubordinates && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); toggleNode(employee.id); }}
+                      className="mt-2 w-full flex items-center justify-center gap-1 px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 rounded transition-colors"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" /></svg>
+                      {employee.subordinates.length} reports
+                      <svg className={`w-3.5 h-3.5 transition-transform ${isExpanded ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                    </button>
+                  )}
+                </div>
+              </div>
+              {hasSubordinates && isExpanded && (
+                useWrappedLayout ? (
+                  <>
+                    <div className="w-[2px] h-6 bg-slate-300"></div>
+                    <div className="flex flex-col items-center gap-4">
+                      {wrappedRows.map((row, rowIndex) => (
+                        <div key={`${employee.id}-row-${rowIndex}`} className="org-level">
+                          {row.map((sub, idx) => (
+                            <div key={sub.id} className="relative flex flex-col items-center org-level-item-wrap">
+                              {idx > 0 && <div className="absolute top-0 right-1/2 w-[calc(50%+0.625rem)] h-[2px] bg-slate-300"></div>}
+                              {idx < row.length - 1 && <div className="absolute top-0 left-1/2 w-[calc(50%+0.625rem)] h-[2px] bg-slate-300"></div>}
+                              <div className="w-[2px] h-6 bg-slate-300"></div>
+                              <EmployeeCard employee={sub} level={level + 1} useWrappedLayout={useWrappedLayout} />
+                            </div>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="w-[2px] h-6 bg-slate-300"></div>
+                    <div className="org-level">
+                      {employee.subordinates.map((sub, idx) => (
+                        <div key={sub.id} className="relative flex flex-col items-center">
+                          {idx > 0 && <div className="absolute top-0 right-1/2 w-[calc(50%+1rem)] h-[2px] bg-slate-300"></div>}
+                          {idx < employee.subordinates.length - 1 && <div className="absolute top-0 left-1/2 w-[calc(50%+1rem)] h-[2px] bg-slate-300"></div>}
+                          <div className="w-[2px] h-6 bg-slate-300"></div>
+                          <EmployeeCard employee={sub} level={level + 1} useWrappedLayout={useWrappedLayout} />
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )
+              )}
+            </div>
+          );
+        };
+
+        return (
+          <div className="h-screen bg-slate-50 flex flex-col">
+            <header className="bg-white border-b border-slate-200 sticky top-0 z-20 shadow-sm flex-shrink-0">
+              <div className="px-3 sm:px-6 lg:px-8 py-2">
+                <div className="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-2">
+                  <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+                    <img
+                      src={IS_FILE_ORIGIN ? HRIS_LOGO_LOCAL : HRIS_LOGO_REMOTE}
+                      onError={(e) => {
+                        if (e.currentTarget.src !== new URL(HRIS_LOGO_LOCAL, window.location.href).href) {
+                          e.currentTarget.src = HRIS_LOGO_LOCAL;
+                        }
+                      }}
+                      alt="Company Logo"
+                      className="w-16 h-12 sm:w-20 sm:h-14 object-contain rounded-lg flex-shrink-0"
+                    />
+                    <div className="min-w-0">
+                      <h1 className="text-base sm:text-lg font-semibold text-slate-900 leading-tight">Organization Chart</h1>
+                      <p className="text-xs text-slate-500">Live Data View</p>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 xl:justify-end">
+                    <div className="file-input-wrapper">
+                      <button className="px-4 py-1.5 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg transition-colors flex items-center gap-2 shadow-sm">
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+                        Upload Excel/CSV
+                      </button>
+                      <input type="file" accept=".csv, .xlsx, .xls" onChange={handleFileUpload} />
+                    </div>
+                    
+                    <button 
+                        onClick={() => setIsHandTool(!isHandTool)} 
+                        className={`p-2 rounded-lg transition-colors border ${isHandTool ? 'bg-blue-100 text-blue-600 border-blue-200 shadow-inner' : 'hover:bg-slate-100 text-slate-600 border-transparent'}`}
+                        title={isHandTool ? "Disable Hand Tool" : "Enable Hand Tool"}
+                    >
+                        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 11.5V14m0-2.5v-6a1.5 1.5 0 113 0m-3 6a1.5 1.5 0 00-3 0v2a7.5 7.5 0 0015 0v-5a1.5 1.5 0 00-3 0m-6-3V11m0-5.5v-1a1.5 1.5 0 013 0v1m0 0V11m0-5.5a1.5 1.5 0 013 0v3m0 0V11" /></svg>
+                    </button>
+
+                    <div className="h-6 w-px bg-slate-300 mx-1"></div>
+
+                    <button onClick={() => setZoomLevel(Math.max(50, zoomLevel - 10))} className="p-2 hover:bg-slate-100 rounded-lg">-</button>
+                    <span className="text-sm font-medium text-slate-600 w-12 text-center">{zoomLevel}%</span>
+                    <button onClick={() => setZoomLevel(Math.min(150, zoomLevel + 10))} className="p-2 hover:bg-slate-100 rounded-lg">+</button>
+                    <button
+                      onClick={() => handleExport("png")}
+                      disabled={!!exportingType || treeData.length === 0}
+                      className="px-3 py-1.5 text-xs font-bold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors shadow-sm flex items-center gap-1"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                      {exportingType === "png" ? "PROCESSING..." : "EXPORT PNG"}
+                    </button>
+                    <button
+                      onClick={() => handleExport("pdf")}
+                      disabled={!!exportingType || treeData.length === 0}
+                      className="px-3 py-1.5 text-xs font-bold text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors shadow-sm flex items-center gap-1"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                      {exportingType === "pdf" ? "PROCESSING..." : "EXPORT PDF"}
+                    </button>
+                    <div className="h-6 w-px bg-slate-300 mx-1"></div>
+
+                    <button onClick={handleExpandAll} className="px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-100 rounded-lg transition-colors">Expand All</button>
+                    <button onClick={handleCollapseAll} className="px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-100 rounded-lg transition-colors">Collapse</button>
+                  </div>
+                </div>
+              </div>
+            </header>
+
+            <div className="bg-white border-b border-slate-200 px-4 sm:px-6 lg:px-8 py-3 flex-shrink-0 relative z-10">
+              <div className="flex flex-wrap items-center gap-3">
+                <input
+                  type="text"
+                  placeholder="Search by Emp ID / Name / Position"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full sm:flex-1 sm:min-w-[220px] sm:max-w-md px-4 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                />
+                <select
+                  value={selectedGroup}
+                  onChange={(e) => {
+                    setSelectedGroup(e.target.value);
+                    setSelectedDivision("all");
+                    setSelectedDepartment("all");
+                    setSelectedUnit("all");
+                  }}
+                  className="w-full sm:w-auto px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none min-w-[150px] sm:min-w-[170px]"
+                >
+                  <option value="all">Group: All</option>
+                  {groupOptions.map((o) => <option key={o} value={o}>{o}</option>)}
+                </select>
+                <select
+                  value={selectedDivision}
+                  onChange={(e) => {
+                    setSelectedDivision(e.target.value);
+                    setSelectedDepartment("all");
+                    setSelectedUnit("all");
+                  }}
+                  className="w-full sm:w-auto px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none min-w-[180px] sm:min-w-[220px]"
+                >
+                  <option value="all">Division: All</option>
+                  {divisionOptions.map((o) => <option key={o} value={o}>{o}</option>)}
+                </select>
+                <select
+                  value={selectedDepartment}
+                  onChange={(e) => {
+                    setSelectedDepartment(e.target.value);
+                    setSelectedUnit("all");
+                  }}
+                  className="w-full sm:w-auto px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none min-w-[180px] sm:min-w-[220px]"
+                >
+                  <option value="all">Department: All</option>
+                  {departmentOptions.map((o) => <option key={o} value={o}>{o}</option>)}
+                </select>
+                <select
+                  value={selectedUnit}
+                  onChange={(e) => setSelectedUnit(e.target.value)}
+                  className="w-full sm:w-auto px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none min-w-[170px] sm:min-w-[200px]"
+                >
+                  <option value="all">Unit: All</option>
+                  {unitOptions.map((o) => <option key={o} value={o}>{o}</option>)}
+                </select>
+                <select
+                  value={selectedCorporateTitle}
+                  onChange={(e) => setSelectedCorporateTitle(e.target.value)}
+                  className="w-full sm:w-auto px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none min-w-[180px] sm:min-w-[220px]"
+                >
+                  <option value="all">Corporate Title: All</option>
+                  {corporateTitleOptions.map((o) => <option key={o} value={o}>{o}</option>)}
+                </select>
+                <button
+                  onClick={handleClearFilters}
+                  className="w-full sm:w-auto px-3 py-2 text-sm font-semibold text-sky-700 bg-sky-100 border border-sky-300 rounded-lg hover:bg-sky-200 hover:border-sky-400 transition-colors"
+                >
+                  Clear Filters
+                </button>
+              </div>
+            </div>
+
+            <div className="bg-white border-b border-slate-200 px-4 sm:px-6 lg:px-8 py-1.5 flex-shrink-0">
+              <div className="flex items-center justify-between mb-1">
+                <h3 className="text-sm font-semibold text-slate-700">Summary by Corporate Title</h3>
+                <div className="flex items-center justify-end flex-wrap gap-1.5 text-[11px]">
+                  <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200">Manpower: {summaryTotals.manpower}</span>
+                  <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200">Headcount: {summaryTotals.headcount}</span>
+                  {summaryTotals.vacant > 0 && (
+                    <span className="px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">Vacant: {summaryTotals.vacant}</span>
+                  )}
+                </div>
+              </div>
+              <div className="max-h-20 overflow-auto pr-1 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-1">
+                {corporateTitleSummary.length === 0 ? (
+                  <div className="text-xs text-slate-400">No summary data</div>
+                ) : (
+                  corporateTitleSummary.map((item) => (
+                    <div key={item.title} className="border border-slate-200 rounded-md px-2 py-1 bg-slate-50">
+                      <div className="flex items-center justify-between">
+                        <p className="text-[10px] font-semibold text-slate-700 truncate pr-2" title={item.title}>{item.title}</p>
+                        <span className="text-[10px] font-bold text-slate-500">{item.total}</span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+              {vacantCorporateTitleSummary.length > 0 && (
+                <div className="mt-1.5 flex items-center flex-wrap gap-1.5">
+                  <span className="text-[11px] font-semibold text-amber-700">Vacant by Corporate Title:</span>
+                  {vacantCorporateTitleSummary.map((item) => (
+                    <span key={`vacant-${item.title}`} className="px-1.5 py-0.5 rounded border border-amber-200 bg-amber-50 text-[10px] font-semibold text-amber-700">
+                      {item.title}: {item.total}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div 
+                ref={scrollContainerRef}
+                className={`flex-1 bg-slate-50 relative
+                    ${isHandTool ? 'overflow-hidden cursor-grab' : 'overflow-auto'} 
+                    ${isPanning ? 'cursor-grabbing select-none' : ''}
+                `}
+                onMouseDown={handleMouseDown}
+                onMouseMove={handleMouseMove}
+                onMouseUp={handleMouseUp}
+                onMouseLeave={handleMouseUp}
+            >
+              <div className="org-export-viewport inline-block min-w-full p-8 text-center" style={{ transform: `scale(${zoomLevel / 100})`, transformOrigin: "top center" }}>
+                <div className="org-tree">
+                  {treeData.length === 0 ? (
+                    <div className="mt-20 text-slate-400">
+                      <p className="text-lg font-medium">No Data</p>
+                      <p className="text-sm">Please upload CSV or Excel (.xlsx)</p>
+                    </div>
+                  ) : (
+                    filteredEmployees.map((emp) => <EmployeeCard key={emp.id} employee={emp} level={0} useWrappedLayout={useWrappedLayout} />)
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {selectedEmployee && (
+              <div className="modal-overlay" onClick={() => setSelectedEmployee(null)}>
+                <div className="modal-content text-left" onClick={(e) => e.stopPropagation()}>
+                  <div className="flex justify-between items-start mb-4">
+                    <h2 className="text-xl font-semibold text-slate-900">Employee Details</h2>
+                    <button onClick={() => setSelectedEmployee(null)} className="text-slate-400 hover:text-slate-600"><svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg></button>
+                  </div>
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-4">
+                      <div className={`export-modal-avatar w-16 h-16 rounded-lg grid place-items-center text-white font-semibold text-lg leading-none ${selectedEmployee.isVacant ? "bg-amber-500" : "bg-blue-600"}`}>
+                        <span className="export-avatar-text">{getEmployeeInitials(selectedEmployee.name, selectedEmployee.isVacant)}</span>
+                      </div>
+                      <div>
+                        <h3 className="font-semibold text-lg text-slate-900">
+                          {selectedEmployee.isVacant ? "Vacant" : (selectedEmployee.name || "-")}{" "}
+                          <span className="text-sm font-normal text-slate-500">
+                            ({selectedEmployee.employeeId || (selectedEmployee.isVacant ? "Vacant Slot" : selectedEmployee.id)})
+                          </span>
+                        </h3>
+                        <p className="text-sm text-slate-600">{selectedEmployee.position}</p>
+                      </div>
+                    </div>
+                    <div className="border-t border-slate-200"></div>
+                    <div className="grid grid-cols-2 gap-4 text-sm">
+                      <div className="bg-slate-50 p-3 rounded"><span className="text-xs text-slate-500 uppercase font-bold block">Group</span>{selectedEmployee.groupName || "-"}</div>
+                      <div className="bg-slate-50 p-3 rounded"><span className="text-xs text-slate-500 uppercase font-bold block">Org Name</span>{selectedEmployee.orgName || "-"}</div>
+                      <div className="bg-slate-50 p-3 rounded"><span className="text-xs text-slate-500 uppercase font-bold block">Email</span>{selectedEmployee.email || "-"}</div>
+                      <div className="bg-slate-50 p-3 rounded"><span className="text-xs text-slate-500 uppercase font-bold block">Phone</span>{selectedEmployee.phone}</div>
+                      <div className="bg-slate-50 p-3 rounded"><span className="text-xs text-slate-500 uppercase font-bold block">Hire Date</span>{formatDate(selectedEmployee.hireDate)}</div>
+                      <div className="bg-slate-50 p-3 rounded"><span className="text-xs text-slate-500 uppercase font-bold block">Supervisor</span>{selectedEmployee.manager_id ? `ID: ${selectedEmployee.manager_id}` : "None"}</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      };
+
+      const root = ReactDOM.createRoot(document.getElementById("root"));
+      root.render(<OrgChartVertical/>);
+    </script>
+    <script>
+      (() => {
+        const appSource = document.getElementById("orgchart-app");
+        if (!appSource || !window.Babel) return;
+        try {
+          const { code } = window.Babel.transform(appSource.textContent, { presets: ["react"] });
+          const run = new Function(code);
+          run();
+        } catch (error) {
+          console.error("Failed to bootstrap app:", error);
+        }
+      })();
+    </script>
+  </body>
+</html>
