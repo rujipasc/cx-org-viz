@@ -4,6 +4,10 @@
 
 This is the official Wails React template.
 
+## User Manual
+
+- Thai detailed guide: `USER_MANUAL_TH.md`
+
 You can configure the project by editing `wails.json`. More information about the project settings can be found
 here: https://wails.io/docs/reference/project-config
 
