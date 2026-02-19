@@ -1,0 +1,180 @@
+name: Build Cross Platform Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  APP_ICON_PNG: frontend/public/appicon.png
+  MANUAL_PDF: frontend/public/CardX_UserManual.pdf
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows/amd64
+            artifact_name: windows-x64
+            package_name: windows-amd64
+          - os: macos-latest
+            platform: darwin/universal
+            artifact_name: macos-universal
+            package_name: macos-universal
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install MinGW (Windows CGO)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install mingw --yes --no-progress
+          $gccDir = "C:\ProgramData\mingw64\mingw64\bin"
+          if (-not (Test-Path $gccDir)) { throw "MinGW bin not found: $gccDir" }
+          Add-Content -Path $env:GITHUB_PATH -Value $gccDir
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Prepare app icon for Wails
+        shell: bash
+        run: |
+          test -f "${APP_ICON_PNG}" || { echo "App icon not found: ${APP_ICON_PNG}"; exit 1; }
+          mkdir -p build
+          cp "${APP_ICON_PNG}" build/appicon.png
+
+      - name: Install Wails CLI
+        shell: bash
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.11.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Build app
+        shell: bash
+        run: wails build -clean -platform "${{ matrix.platform }}"
+
+      - name: Resolve app name
+        id: app_meta
+        shell: bash
+        run: |
+          app_name=$(node -e "const fs=require('fs');const c=JSON.parse(fs.readFileSync('wails.json','utf8'));process.stdout.write(c.outputfilename||c.name||'')")
+          test -n "$app_name" || { echo "Unable to resolve app name from wails.json"; exit 1; }
+          echo "app_name=$app_name" >> "$GITHUB_OUTPUT"
+
+      - name: Package Windows (.exe + manual)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $appName = "${{ steps.app_meta.outputs.app_name }}"
+          $tagName = "${{ github.ref_name }}"
+          if (-not $tagName) { $tagName = "dev-${{ github.run_number }}" }
+          $exePath = "build/bin/$appName.exe"
+          $manualPath = "${{ env.MANUAL_PDF }}"
+          $stageDir = "build/release/windows"
+          $zipPath = "build/bin/$appName-${{ matrix.package_name }}.zip"
+
+          if (-not (Test-Path $exePath)) { throw "EXE not found: $exePath" }
+          if (-not (Test-Path $manualPath)) { throw "Manual PDF not found: $manualPath" }
+
+          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+          Copy-Item $exePath "$stageDir/$appName.exe" -Force
+          Copy-Item $manualPath "$stageDir/CardX_UserManual-$tagName.pdf" -Force
+
+          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+          Compress-Archive -Path "$stageDir/*" -DestinationPath $zipPath -Force
+
+      - name: Package macOS (.app + manual)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          app_name="${{ steps.app_meta.outputs.app_name }}"
+          tag_name="${{ github.ref_name }}"
+          if [ -z "$tag_name" ]; then
+            tag_name="dev-${{ github.run_number }}"
+          fi
+
+          app_path="build/bin/${app_name}.app"
+          manual_path="${MANUAL_PDF}"
+          stage_dir="build/release/macos"
+          zip_path="build/bin/${app_name}-${{ matrix.package_name }}.zip"
+
+          test -d "$app_path" || { echo "App bundle not found: $app_path"; ls -la build/bin; exit 1; }
+          test -f "$manual_path" || { echo "Manual PDF not found: $manual_path"; exit 1; }
+
+          mkdir -p "$stage_dir"
+          cp -R "$app_path" "$stage_dir/${app_name}.app"
+          cp "$manual_path" "$stage_dir/CardX_UserManual-${tag_name}.pdf"
+
+          rm -f "$zip_path"
+          ditto -c -k --sequesterRsrc --keepParent "$stage_dir" "$zip_path"
+
+      - name: Upload Windows artifacts
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cardx-${{ matrix.artifact_name }}
+          path: |
+            build/bin/*.exe
+            build/bin/*-${{ matrix.package_name }}.zip
+          if-no-files-found: error
+
+      - name: Upload macOS artifacts
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cardx-${{ matrix.artifact_name }}
+          path: |
+            build/bin/*-${{ matrix.package_name }}.zip
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Prepare versioned manual PDF
+        run: |
+          tag_name="${GITHUB_REF_NAME}"
+          cp "${MANUAL_PDF}" "release-artifacts/CardX_UserManual-${tag_name}.pdf"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release-artifacts/**/*.exe
+            release-artifacts/**/*.zip
+            release-artifacts/CardX_UserManual-*.pdf
