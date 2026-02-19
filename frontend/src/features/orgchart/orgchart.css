@@ -35,9 +35,16 @@ html {
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", sans-serif;
+  font-family: "CardXBrand", -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", sans-serif;
   background-color: #f8fafc;
   overflow: hidden;
+}
+
+input,
+button,
+select,
+textarea {
+  font: inherit;
 }
 
 .animate-in {
@@ -174,3 +181,4 @@ body.export-mode .org-level-wrap {
   max-width: none !important;
 }
 body.export-mode .org-level-wrap + .org-level-wrap { margin-top: 0.55rem !important; }
+body.export-mode .app-watermark { display: none !important; }
