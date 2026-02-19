@@ -43,11 +43,17 @@ import useOrgChartExport from "./hooks/useOrgChartExport";
           const div = getVal("Division");
           const group = getVal("Group");
           const positionText = (getVal("Position") || "").toString().trim().toLowerCase();
+          const corporateTitleText = (getVal("Corporate Title") || "").toString().trim().toLowerCase();
           const divisionText = (div || "").toString().trim().toLowerCase();
           const isCEO = positionText.includes("chief executive officer") || positionText === "ceo";
+          const isChiefLevel = !isCEO && (positionText.includes("chief") || corporateTitleText.includes("chief"));
           const isCPO = positionText.includes("chief people officer") || divisionText.includes("cpo office");
 
           if (isCEO) { orgType = "Company"; orgName = getVal("Company") || "CardX"; }
+          else if (isChiefLevel) {
+            orgType = group ? "Group" : (div ? "Division" : (dept ? "Department" : (unit ? "Unit" : "Company")));
+            orgName = group || div || dept || unit || getVal("Company") || "CardX";
+          }
           else if (unit) { orgType = "Unit"; orgName = unit; }
           else if (dept) { orgType = "Department"; orgName = dept; }
           else if (isCPO && group) { orgType = "Group"; orgName = group; }
@@ -421,9 +427,104 @@ import useOrgChartExport from "./hooks/useOrgChartExport";
           });
         };
 
+        const normalizeOrgText = (value) => (value || "").toString().trim().toLowerCase();
+        const hasRealEmployeeDescendant = (node) => {
+          if (!node) return false;
+          if (!node.isOrgNode) return true;
+          return (node.subordinates || []).some((child) => hasRealEmployeeDescendant(child));
+        };
+
+        const pruneRedundantOrgNodes = (nodes) => {
+          return (nodes || []).reduce((acc, node) => {
+            const cleanedChildren = pruneRedundantOrgNodes(node.subordinates || []);
+            let currentNode = { ...node, subordinates: cleanedChildren };
+
+            if (currentNode.isOrgNode) {
+              // Collapse same-name chained org nodes (e.g. Group -> Division with identical name).
+              while (
+                currentNode.subordinates.length === 1
+                && currentNode.subordinates[0]?.isOrgNode
+                && normalizeOrgText(currentNode.orgName || currentNode.name) === normalizeOrgText(currentNode.subordinates[0].orgName || currentNode.subordinates[0].name)
+              ) {
+                currentNode = {
+                  ...currentNode,
+                  subordinates: currentNode.subordinates[0].subordinates || []
+                };
+              }
+
+              const directPeopleChildren = currentNode.subordinates.filter((child) => !child?.isOrgNode);
+              const orgChildren = currentNode.subordinates.filter((child) => !!child?.isOrgNode);
+              const hasDirectPeopleOrVacant = directPeopleChildren.length > 0;
+              const hasOnlyCompanyLevelPeople = directPeopleChildren.length > 0
+                && directPeopleChildren.every((child) => {
+                  const orgTypeText = (child?.orgType || "").toString().trim().toLowerCase();
+                  return orgTypeText === "company" || isCeoNode(child);
+                });
+
+              // If non-Group org node has no direct people card (employee/vacant), lift child org nodes up one level.
+              // Vacant is treated as a people card and must keep this node.
+              if (
+                (currentNode.orgType || "") !== "Group"
+                && !hasDirectPeopleOrVacant
+                && orgChildren.length > 0
+              ) {
+                acc.push(...orgChildren);
+                return acc;
+              }
+
+              // Drop synthetic group wrappers that only contain company-level people (e.g. CEO Office -> CEO card).
+              if (
+                (currentNode.orgType || "") === "Group"
+                && orgChildren.length === 0
+                && hasOnlyCompanyLevelPeople
+              ) {
+                acc.push(...directPeopleChildren);
+                return acc;
+              }
+
+              // Remove org nodes that do not contain any real employee in their subtree.
+              if (!hasRealEmployeeDescendant(currentNode)) {
+                return acc;
+              }
+            }
+
+            acc.push(currentNode);
+            return acc;
+          }, []);
+        };
+
+        const stripEmployeeIdsFromTree = (nodes, excludedIds) => {
+          return (nodes || []).reduce((acc, node) => {
+            if (!node) return acc;
+            if (!node.isOrgNode && excludedIds.has(node.id)) return acc;
+            const nextNode = {
+              ...node,
+              subordinates: stripEmployeeIdsFromTree(node.subordinates || [], excludedIds)
+            };
+            acc.push(nextNode);
+            return acc;
+          }, []);
+        };
+
         const roots = Array.from(groupMap.values());
-        sortOrgTree(roots);
-        return roots;
+        const cleanedRoots = pruneRedundantOrgNodes(roots);
+        sortOrgTree(cleanedRoots);
+
+        // In Organization view, anchor hierarchy under CEO (Company level) when available.
+        const ceoCandidates = scoped.filter((employee) => isCeoNode(employee));
+        if (ceoCandidates.length === 0) {
+          return cleanedRoots;
+        }
+
+        const [primaryCeo] = [...ceoCandidates].sort(compareReportOrder);
+        const ceoIds = new Set(ceoCandidates.map((employee) => employee.id));
+        const orgRootsWithoutCeoCards = stripEmployeeIdsFromTree(cleanedRoots, ceoIds);
+        sortOrgTree(orgRootsWithoutCeoCards);
+
+        return [{
+          ...primaryCeo,
+          subordinates: orgRootsWithoutCeoCards
+        }];
       };
 
       const OrgChartVertical = () => {
@@ -442,6 +543,29 @@ import useOrgChartExport from "./hooks/useOrgChartExport";
         const [isPanning, setIsPanning] = useState(false);
         const [startPan, setStartPan] = useState({ x: 0, y: 0, scrollLeft: 0, scrollTop: 0 });
         const scrollContainerRef = useRef(null);
+        const pendingCenterNodeIdRef = useRef(null);
+
+        const centerNodeInView = (nodeId) => {
+          const container = scrollContainerRef.current;
+          if (!container || !nodeId) return;
+
+          const escapedNodeId = window.CSS?.escape ? window.CSS.escape(nodeId) : nodeId.replace(/"/g, "\\\"");
+          const nodeEl = container.querySelector(`[data-org-node-id=\"${escapedNodeId}\"]`);
+          if (!nodeEl) return;
+
+          const containerRect = container.getBoundingClientRect();
+          const nodeRect = nodeEl.getBoundingClientRect();
+
+          const deltaX = (nodeRect.left + (nodeRect.width / 2)) - (containerRect.left + (containerRect.width / 2));
+          const deltaY = (nodeRect.top + (nodeRect.height / 2)) - (containerRect.top + (containerRect.height / 2));
+
+          const maxScrollLeft = Math.max(0, container.scrollWidth - container.clientWidth);
+          const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+          const targetLeft = Math.min(maxScrollLeft, Math.max(0, container.scrollLeft + deltaX));
+          const targetTop = Math.min(maxScrollTop, Math.max(0, container.scrollTop + deltaY));
+
+          container.scrollTo({ left: targetLeft, top: targetTop, behavior: "smooth" });
+        };
 
         const handleMouseDown = (e) => {
           if (!isHandTool) return;
@@ -768,7 +892,7 @@ import useOrgChartExport from "./hooks/useOrgChartExport";
           setSelectedCorporateTitle("all");
         };
 
-        const handleExpandAll = () => {
+        const handleExpandAll = (centerOnFirstRoot = false) => {
             const allIds = new Set();
             const traverse = (nodes) => {
                 nodes.forEach(n => {
@@ -777,6 +901,9 @@ import useOrgChartExport from "./hooks/useOrgChartExport";
                 });
             }
             traverse(filteredEmployees);
+            pendingCenterNodeIdRef.current = centerOnFirstRoot
+              ? (filteredEmployees[0]?.id || null)
+              : null;
             setExpandedNodes(allIds);
         }
 
@@ -794,10 +921,24 @@ import useOrgChartExport from "./hooks/useOrgChartExport";
         const toggleNode = (nodeId) => {
           setExpandedNodes((prev) => {
             const next = new Set(prev);
-            if (next.has(nodeId)) next.delete(nodeId); else next.add(nodeId);
+            const willExpand = !next.has(nodeId);
+            if (willExpand) next.add(nodeId); else next.delete(nodeId);
+            pendingCenterNodeIdRef.current = willExpand ? nodeId : null;
             return next;
           });
         };
+
+        useEffect(() => {
+          const nodeId = pendingCenterNodeIdRef.current;
+          if (!nodeId) return;
+
+          const rafId = requestAnimationFrame(() => {
+            centerNodeInView(nodeId);
+            pendingCenterNodeIdRef.current = null;
+          });
+
+          return () => cancelAnimationFrame(rafId);
+        }, [expandedNodes]);
 
         return (
           <div className="h-screen bg-slate-50 flex flex-col">
@@ -860,7 +1001,7 @@ import useOrgChartExport from "./hooks/useOrgChartExport";
                     </button>
                     <div className="h-6 w-px bg-slate-300 mx-1"></div>
 
-                    <button onClick={handleExpandAll} className="px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-100 rounded-lg transition-colors">Expand All</button>
+                    <button onClick={() => handleExpandAll(true)} className="px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-100 rounded-lg transition-colors">Expand All</button>
                     <button onClick={handleCollapseAll} className="px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-100 rounded-lg transition-colors">Collapse</button>
                   </div>
                 </div>

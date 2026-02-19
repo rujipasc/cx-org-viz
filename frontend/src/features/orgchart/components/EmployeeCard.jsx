@@ -27,7 +27,7 @@ function EmployeeCard({
   const displayName = isVacant ? "Vacant" : employee.name || "-";
 
   return (
-    <div className="org-node">
+    <div className="org-node" data-org-node-id={employee.id}>
       <div
         className={`
           bg-white rounded-lg shadow-sm border-2 transition-all duration-200 relative z-20
