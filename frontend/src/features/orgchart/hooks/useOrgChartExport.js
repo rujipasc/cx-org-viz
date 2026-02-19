@@ -846,11 +846,19 @@ function useOrgChartExport({
           orientation: "landscape",
           unit: "px",
           format: [finalWidth, finalHeight],
-          compress: true,
+          compress: false,
           putOnlyUsedFonts: true
         });
 
-        pdf.addImage(finalCanvas, "PNG", 0, 0, finalWidth, finalHeight);
+        // Use JPEG for PDF embedding first because some jsPDF+PNG paths can drop
+        // portions of large canvases in packaged desktop runtimes.
+        try {
+          const jpegDataUrl = finalCanvas.toDataURL("image/jpeg", 0.98);
+          pdf.addImage(jpegDataUrl, "JPEG", 0, 0, finalWidth, finalHeight, undefined, "FAST");
+        } catch (jpegError) {
+          console.warn("PDF JPEG embed fallback to PNG:", jpegError?.message || jpegError);
+          pdf.addImage(finalCanvas, "PNG", 0, 0, finalWidth, finalHeight);
+        }
 
         const filename = `CardX_Full_OrgChart_${timestamp}.pdf`;
         const pdfDataUrl = pdf.output("datauristring");
