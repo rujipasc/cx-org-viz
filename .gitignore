@@ -1,3 +1,10 @@
 build/bin
 node_modules
 frontend/dist
+
+# OS metadata
+.DS_Store
+**/.DS_Store
+
+# Local build executable
+cardx-orgchart-wails
